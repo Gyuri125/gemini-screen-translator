@@ -1,0 +1,28 @@
+# Környezeti változók és titkos adatok
+.env
+
+# Régi kódok és felesleges helyi könyvtárak
+Régi kódok/
+Tesseract-OCR/
+
+# Python és csomagkezelő szemét
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# PyInstaller fordítási kimenetek
+build/
+dist/
+*.spec
+
+# Debug / tesztképek
+debug_*.png
+*.png
+*.jpg
+
+# PyCharm / IDE fájlok
+.idea/
+.vscode/

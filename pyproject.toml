@@ -1,0 +1,10 @@
+[project]
+name = "ai-ford-t"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "deep-translator>=1.11.4",
+    "pillow>=12.3.0",
+    "pynput>=1.8.2",
+    "pytesseract>=0.3.13",
+]
