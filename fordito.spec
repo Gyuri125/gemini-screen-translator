@@ -13,6 +13,8 @@ a = Analysis(
         'google.genai',
         'PIL',
         'mss',
+        'win32com.client',
+        'pythoncom',
     ],
     hookspath=[],
     hooksconfig={},

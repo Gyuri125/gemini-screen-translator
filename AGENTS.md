@@ -27,15 +27,16 @@ The application is a single-process, multi-threaded desktop utility running on W
                                  │
                   ┌──────────────▼──────────────────────────────┐
                   │              Worker Daemon Thread           │
-                  │   1. PIL Image Resizing / JPEG Optim        │
+                  │   1. PIL Image Resizing / RGB Optim         │
                   │   2. Gemini API Flash Vision Call           │
                   │   3. Pydantic Structured JSON Validation    │
                   │   4. History Buffer Update                  │
+                  │   5. Optional Native SAPI TTS Trigger       │
                   └──────────────┬──────────────────────────────┘
                                  │ root.after(0)
                   ┌──────────────▼──────────────────────────────┐
                   │         Display Result (Main Thread)        │
-                  │    Compact Subtitle HUD  OR  Full Window    │
+                  │  In-Place Lens  /  Subtitle HUD  /  Window  │
                   └─────────────────────────────────────────────┘
 ```
 
@@ -78,24 +79,30 @@ The user interacts with the canvas via mouse and keyboard:
   Passed to `types.GenerateContentConfig(response_mime_type="application/json", response_schema=TranslationResult, temperature=0.2)`.
   This guarantees that response text is 100% valid JSON without fragile regex or string delimiters.
 
-### 2.4 Image Optimization (`optimize_image_for_vision`)
-* Converts non-RGB images to standard RGB.
-* Clamps max dimension to 1600 px using high-quality `LANCZOS` downsampling.
-* Eliminates massive uncompressed payloads when snipping high-resolution / 4K monitors, reducing upload latency by up to 70%.
-
-### 2.5 Dual Display Modes
-1. **Compact Subtitle HUD (`_show_compact_hud`):**
-   * Designed for games and visual novels.
-   * Renders a sleek, borderless, dark-glass card floating right below (or above if constrained by screen bottom) the cropped region.
+### 2.4 Three Display Modes
+1. **In-Place Lens Overlay (`_show_lens_overlay`):**
+   * Inspired by Google Lens camera translation.
+   * Renders directly on top of the original crop coordinates `(bx1, by1, bx2, by2)` with `-alpha 0.94` dark translucent glass.
+   * Directly masks foreign dialogue text with native typography in the translated language.
+   * Auto-dismisses on click, `Escape`, or after 15 seconds.
+2. **Compact Subtitle HUD (`_show_compact_hud`):**
+   * Designed for games and visual novels where original art should remain unobstructed.
+   * Floats directly beneath (or above if constrained by screen boundary) the cropped region.
    * Auto-dismisses after 15 seconds, or closes on `Esc` / click.
-   * Provides quick `📋 Copy`, `🔍 Full View`, and `📜 History` buttons.
-2. **Detailed Window (`_show_detailed_window`):**
-   * Traditional 780x560 multi-pane text view with original transcription, translation, model telemetry, and copy button.
+   * Provides quick `🔊 Listen`, `📋 Copy`, `🔍 Full View`, and `📜 History` buttons.
+3. **Detailed Window (`_show_detailed_window`):**
+   * Traditional 780x560 multi-pane text view with original transcription, translation, model telemetry, TTS, and copy button.
+
+### 2.5 Text-to-Speech Subsystem (Native Windows SAPI)
+* Implemented via Windows native COM `SAPI.SpVoice` (`speak_text_async`).
+* Operates in an asynchronous worker thread with `pythoncom.CoInitialize()`.
+* Flag `3` (`SVSFlagsAsync | SVSFPurgeBeforeSpeak`) cancels active utterances and immediately speaks without blocking the Tkinter event loop.
+* Zero external audio binaries or internet bandwidth required.
 
 ### 2.6 History System (`show_history_window`)
 * In-memory rolling buffer (last 50 translations).
 * Searchable via real-time Tkinter text filter.
-* Shows timestamp, detected language pair (`JP ➔ EN`), original, and translated text with per-item copy buttons.
+* Shows timestamp, detected language pair (`JP ➔ EN`), original, and translated text with per-item copy and TTS speak buttons.
 * Triggerable via hotkey (`Alt + H`), tray icon, or HUD buttons.
 
 ### 2.7 System Tray Integration (`pystray`)
@@ -113,8 +120,9 @@ The user interacts with the canvas via mouse and keyboard:
 | `HOTKEY` | `string` | `<alt>+t` | Global hotkey to trigger screen capture |
 | `HISTORY_HOTKEY` | `string` | `<alt>+h` | Global hotkey to open translation history |
 | `TARGET_LANGUAGE` | `string` | `English` | Default target translation language |
-| `OVERLAY_MODE` | `string` | `compact` | `"compact"` for floating subtitle HUD, `"window"` for full window |
+| `OVERLAY_MODE` | `string` | `compact` | Display mode: `"compact"` (HUD), `"lens"` (In-place), or `"window"` (Full) |
 | `AUTO_COPY` | `boolean` | `false` | Automatically copy translated text to clipboard |
+| `AUTO_TTS` | `boolean` | `false` | Automatically speak translated text aloud via Windows native TTS |
 
 ---
 
@@ -126,7 +134,7 @@ The user interacts with the canvas via mouse and keyboard:
 2. **Do Not Reintroduce OCR Engines:**
    * Do NOT add Tesseract, pytesseract, or local EasyOCR dependencies. Gemini Vision Flash handles transcription and translation natively in a single API call with higher accuracy on stylized game fonts.
 3. **Structured Outputs:**
-   * Keep `TranslationResult` Pydantic model intact. If adding metadata (e.g. grammar breakdown, phonetics), add fields to `TranslationResult` and let Gemini fill them via JSON schema.
+   * Keep `TranslationResult` Pydantic model intact. If adding metadata, add fields to `TranslationResult` and let Gemini fill them via JSON schema.
 4. **PyInstaller Packaging:**
-   * Always build using `fordito.spec` (`pyinstaller fordito.spec --noconfirm`).
+   * Always build using `build_exe.bat` or `fordito.spec` (`pyinstaller fordito.spec --noconfirm --clean`).
    * Target executable is `dist/GeminiScreenTranslator.exe`.

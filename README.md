@@ -2,17 +2,19 @@
 
 # Gemini Screen Translator
 
-**Real-time, multi-monitor in-game screen capture and AI vision translation overlay.**  
-*Powered by Google Gemini Multimodal Flash, MSS Framebuffer Capture, and Tkinter.*
+**Real-time, multi-monitor in-game screen capture, AI vision translation, and native TTS speech overlay.**  
+*Powered by Google Gemini Multimodal Flash, MSS Framebuffer Capture, and Windows SAPI.*
 
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue?logo=python&logoColor=white)](https://python.org)
 [![AI Engine](https://img.shields.io/badge/AI-Google%20Gemini%20Flash-4285F4?logo=google&logoColor=white)](https://aistudio.google.com)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://microsoft.com)
+[![Speech Engine](https://img.shields.io/badge/TTS-Native%20Windows%20SAPI-informational)](https://microsoft.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 <br/>
 
 [Overview](#overview) •
+[Display Modes](#three-display-modes) •
 [Features](#features) •
 [Controls](#controls) •
 [Installation](#installation) •
@@ -32,27 +34,42 @@ Gemini Screen Translator addresses this through a modern multimodal pipeline:
 
 1. **Direct Framebuffer Capture:** Captures freeze-frame snips across any connected display via MSS, bypassing DirectX black-screen capture issues.
 2. **Native Multimodal Vision:** Streams cropped screen regions directly to Google Gemini Flash Vision. The vision model performs verbatim transcription, source language detection, and context-aware translation in a single low-latency call.
-3. **Zero Local Model Overhead:** Requires no heavy local OCR binaries, model weights, or specialized GPU setup.
+3. **In-Place Lens & Subtitle HUD:** Replaces foreign text directly where it appears on screen or projects floating subtitles beneath the action.
+4. **Native Text-to-Speech (TTS):** Windows native SAPI speech engine reads translations aloud with zero latency and zero extra bandwidth.
+5. **Zero Local Model Overhead:** Requires no heavy local OCR binaries, model weights, or specialized GPU setup.
+
+---
+
+## Three Display Modes
+
+Gemini Screen Translator provides three distinct display workflows switchable on the fly via the toolbar, `.env`, or the System Tray menu:
+
+| Mode | Visual Presentation | Ideal Use Case |
+|---|---|---|
+| **In-Place Lens Overlay** (`lens`) | Renders directly on top of the original crop with dark translucent glass, masking the foreign dialogue with translated text. | Comics, manga, game UI elements, and dialog boxes where you want translated text in the original location. |
+| **Compact Subtitle HUD** (`compact`) | Projects a sleek, borderless floating card right below the crop. Auto-dismisses after 15 seconds or on click. | Action games and visual novels where game graphics inside the box must stay visible. |
+| **Full Detailed Window** (`window`) | Multi-pane 780x560 window showing original verbatim text, detected source language, translation, and copy button. | Studying languages, reading long articles, or copying paragraphs. |
 
 ---
 
 ## Features
 
 ### Display and HUD Integration
-* **Compact Subtitle HUD:** Renders translations as a borderless, floating subtitle card positioned directly below the cropped region. Ideal for games and visual novels without cluttering the screen.
-* **Full Result Viewer:** Multi-pane detailed window containing original transcribed text, detected source language, translation output, and model telemetry.
+* **In-Place Lens Overlay:** Covers the cropped region with clean, native typography in your target language matching the selection geometry.
+* **Compact Subtitle HUD:** Floating non-intrusive subtitle card with one-click copy, TTS speech, and history access.
 * **Dimmed Snip Overlay:** Semi-transparent dark mask dynamically highlights your selection while dimming surrounding screen content.
 * **8-Point Mouse Resize Handles:** Adjust active selections using 8 corner and edge handles, or drag the inside of the box to reposition.
 * **Multi-Monitor Coordinate Space:** Maps seamless coordinate spaces across multiple displays, including secondary screens with negative virtual coordinates.
 * **Per-Monitor DPI Awareness:** Windows Per-Monitor v2 DPI handling ensures 1:1 pixel accuracy across 100%, 125%, 150%, and 4K displays.
 
-### Performance and AI Engine
+### Performance and Speech
+* **Native Windows TTS (Text-to-Speech):** Speaks translations aloud on demand or automatically via Windows native SAPI. Runs asynchronously in a daemon thread with zero GUI stutter.
 * **Model Discovery Caching:** Resolves available Gemini Flash models on startup in the background. Snip requests route immediately without runtime list latency.
 * **Structured JSON Schema:** Enforces response schema via Pydantic (`detected_language`, `original_text`, `translated_text`), preventing formatting anomalies and string-parsing failures.
 * **Image Optimization:** Downsamples oversized captures (such as 4K dialogue boxes) to max 1600 px RGB, reducing upload payload size by up to 70%.
 
 ### User Experience
-* **Translation History (Alt + H):** In-memory rolling log of past translations with real-time text search, timestamps, and per-item clipboard copy.
+* **Translation History (Alt + H):** In-memory rolling log of past translations with real-time text search, timestamps, TTS playback, and per-item clipboard copy.
 * **Automatic Clipboard Copy:** Optionally copies translations directly to the Windows clipboard upon completion.
 * **System Tray Integration:** Unobtrusive system tray icon with quick menus for language selection, display mode toggle, settings, and graceful exit.
 
@@ -72,7 +89,7 @@ Gemini Screen Translator addresses this through a modern multimodal pipeline:
 | **Resize Selection (1 px)** | `Alt` + Arrow keys |
 | **Resize Selection (10 px)** | `Alt` + `Shift` + Arrow keys |
 | **Approve & Translate** | `Enter` or click "Translate" button |
-| **Dismiss / Cancel** | `Escape` |
+| **Dismiss / Cancel** | `Escape` or Click on overlay |
 
 ---
 
@@ -134,6 +151,7 @@ The application automatically detects the source language in the image and suppo
    TARGET_LANGUAGE=English
    OVERLAY_MODE=compact
    AUTO_COPY=false
+   AUTO_TTS=false
    ```
 
 5. **Start the application:**
@@ -154,8 +172,9 @@ All application settings are stored in `.env` and can also be modified through t
 | `HOTKEY` | `<alt>+t` | Global hotkey to trigger screen capture overlay |
 | `HISTORY_HOTKEY` | `<alt>+h` | Global hotkey to open translation history |
 | `TARGET_LANGUAGE` | `English` | Target translation language |
-| `OVERLAY_MODE` | `compact` | Display mode: `compact` (floating subtitle HUD) or `window` (detailed window) |
+| `OVERLAY_MODE` | `compact` | Display mode: `compact` (floating subtitle HUD), `lens` (in-place text replacement), or `window` (detailed window) |
 | `AUTO_COPY` | `false` | Automatically copy translated text to the system clipboard |
+| `AUTO_TTS` | `false` | Automatically speak translated text aloud via Windows native TTS |
 
 ---
 
@@ -184,11 +203,12 @@ All application settings are stored in `.env` and can also be modified through t
                   │   2. Gemini Flash Vision API Call           │
                   │   3. Pydantic Structured JSON Validation    │
                   │   4. History Rolling Buffer Update          │
+                  │   5. Optional Native SAPI TTS Trigger       │
                   └──────────────┬──────────────────────────────┘
                                  │ root.after(0)
                   ┌──────────────▼──────────────────────────────┐
                   │         Display Result (Main Thread)        │
-                  │    Compact Subtitle HUD  OR  Full Window    │
+                  │  In-Place Lens  /  Subtitle HUD  /  Window  │
                   └─────────────────────────────────────────────┘
 ```
 

@@ -26,8 +26,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 HOTKEY_COMBINATION = os.getenv("HOTKEY", "<alt>+t")
 HISTORY_HOTKEY = os.getenv("HISTORY_HOTKEY", "<alt>+h")
 DEFAULT_TARGET_LANG = os.getenv("TARGET_LANGUAGE", "English")
-DEFAULT_OVERLAY_MODE = os.getenv("OVERLAY_MODE", "compact").lower()  # "compact" or "window"
+DEFAULT_OVERLAY_MODE = os.getenv("OVERLAY_MODE", "compact").lower()  # "compact" | "lens" | "window"
 DEFAULT_AUTO_COPY = os.getenv("AUTO_COPY", "false").lower() in ("true", "1", "yes")
+DEFAULT_AUTO_TTS = os.getenv("AUTO_TTS", "false").lower() in ("true", "1", "yes")
 
 AVAILABLE_LANGUAGES = [
     "English",
@@ -78,6 +79,30 @@ class TranslationResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# TTS (Text-to-Speech) Native Windows Engine
+# ---------------------------------------------------------------------------
+def speak_text_async(text: str):
+    """Asynchronously speak text using Windows SAPI TTS engine without blocking the GUI."""
+    if not text or not text.strip():
+        return
+
+    clean_text = text.strip()
+
+    def _speak():
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            import win32com.client
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            # 3 = SVSFlagsAsync (1) | SVSFPurgeBeforeSpeak (2)
+            speaker.Speak(clean_text, 3)
+        except Exception:
+            pass
+
+    threading.Thread(target=_speak, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Image Optimization Helper
 # ---------------------------------------------------------------------------
 def optimize_image_for_vision(image: Image.Image, max_dimension: int = 1600) -> Image.Image:
@@ -116,8 +141,9 @@ class ScreenTranslatorApp:
 
         # State settings
         self.target_language = tk.StringVar(value=DEFAULT_TARGET_LANG)
-        self.overlay_mode = tk.StringVar(value=DEFAULT_OVERLAY_MODE)  # "compact" | "window"
+        self.overlay_mode = tk.StringVar(value=DEFAULT_OVERLAY_MODE)  # "compact" | "lens" | "window"
         self.auto_copy = tk.BooleanVar(value=DEFAULT_AUTO_COPY)
+        self.auto_tts = tk.BooleanVar(value=DEFAULT_AUTO_TTS)
 
         # Cached models list (populated once at startup)
         self.cached_models: list[str] = list(FALLBACK_FLASH_MODELS)
@@ -474,9 +500,13 @@ class ScreenTranslatorApp:
         combo = ttk.Combobox(action_row, textvariable=self.target_language, values=AVAILABLE_LANGUAGES, width=11, state="readonly")
         combo.pack(side="left", padx=4)
 
-        # Mode button
+        # Mode button (cycles: compact -> lens -> window -> compact)
+        mode_order = ["compact", "lens", "window"]
+
         def toggle_mode():
-            new_mode = "window" if self.overlay_mode.get() == "compact" else "compact"
+            current = self.overlay_mode.get()
+            idx = mode_order.index(current) if current in mode_order else 0
+            new_mode = mode_order[(idx + 1) % len(mode_order)]
             self.overlay_mode.set(new_mode)
             btn_mode.config(text=f"Mode: {new_mode.capitalize()}")
 
@@ -518,14 +548,15 @@ class ScreenTranslatorApp:
         )
         btn_cancel.pack(side="left", padx=2)
 
-        # Row 2: Cheatsheet / Súgó
+        # Row 2: Cheatsheet / Guide
         help_row = tk.Frame(self.toolbar_frame, bg="#27272a", bd=0, padx=6, pady=4)
         help_row.pack(fill="x", pady=(6, 0))
-        help_text = "💡 Move: Drag inside or Arrows | Resize: Drag handles or Alt+Arrows | Auto-Copy: " + ("ON" if self.auto_copy.get() else "OFF")
+        tts_status = "ON" if self.auto_tts.get() else "OFF"
+        help_text = f"💡 Move/Resize: Mouse or Arrows | Mode: {self.overlay_mode.get().capitalize()} | TTS: {tts_status}"
         tk.Label(help_row, text=help_text, fg="#a3e635", bg="#27272a", font=("Consolas", 8)).pack(anchor="w")
 
         # Position clamping
-        tb_width = 460
+        tb_width = 470
         pos_x = max(10, min(x, self.bounds['width'] - tb_width))
         pos_y = y + 10 if (y + 90) < self.bounds['height'] else max(10, y - 85)
         self.toolbar_frame.place(x=pos_x, y=pos_y)
@@ -542,7 +573,7 @@ class ScreenTranslatorApp:
         target_lang = self.target_language.get()
         mode = self.overlay_mode.get()
 
-        # Save screen position of crop box for compact HUD placement
+        # Save screen position of crop box for placement
         box_screen_coords = (
             self.bounds['left'] + x1,
             self.bounds['top'] + y1,
@@ -631,6 +662,10 @@ class ScreenTranslatorApp:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(trans)
 
+            # Auto-TTS speech if enabled
+            if success and self.auto_tts.get() and trans:
+                speak_text_async(trans)
+
             # Record in history
             history_item = {
                 "time": datetime.now().strftime("%H:%M:%S"),
@@ -654,13 +689,92 @@ class ScreenTranslatorApp:
         except Exception:
             pass
 
-        if mode == "compact":
+        if mode == "lens":
+            self._show_lens_overlay(orig, trans, detected_lang, used_model, target_lang, box_screen_coords)
+        elif mode == "compact":
             self._show_compact_hud(orig, trans, detected_lang, used_model, target_lang, box_screen_coords)
         else:
             self._show_detailed_window(orig, trans, detected_lang, used_model, target_lang)
 
     # -----------------------------------------------------------------------
-    # Result UI: 1) Compact Floating Subtitle HUD
+    # Result UI: 1) In-Place Lens Mode (Covers original text directly)
+    # -----------------------------------------------------------------------
+    def _show_lens_overlay(self, orig: str, trans: str, detected_lang: str, used_model: str, target_lang: str, box_screen_coords: tuple):
+        """Displays translated text directly on top of the original text area (Google Lens style)."""
+        if self.current_hud_win:
+            try:
+                self.current_hud_win.destroy()
+            except Exception:
+                pass
+
+        bx1, by1, bx2, by2 = box_screen_coords
+        w = max(200, bx2 - bx1)
+        h = max(60, by2 - by1)
+
+        lens = tk.Toplevel(self.root)
+        self.current_hud_win = lens
+        lens.overrideredirect(True)
+        lens.attributes("-topmost", True)
+        # Translucent dark background matching game ambiance
+        lens.attributes("-alpha", 0.94)
+        lens.config(bg="#121214")
+        lens.geometry(f"{w}x{h}+{bx1}+{by1}")
+
+        container = tk.Frame(lens, bg="#121214", bd=1, relief="solid", highlightthickness=1, highlightbackground="#00e5ff", padx=6, pady=4)
+        container.pack(fill="both", expand=True)
+
+        # Micro Top Bar
+        top_bar = tk.Frame(container, bg="#121214")
+        top_bar.pack(fill="x", pady=(0, 2))
+
+        lbl_badge = tk.Label(top_bar, text=f"{detected_lang} ➔ {target_lang}", fg="#00e5ff", bg="#121214", font=("Segoe UI", 7, "bold"))
+        lbl_badge.pack(side="left")
+
+        btn_close = tk.Label(top_bar, text="✖", fg="#71717a", bg="#121214", font=("Segoe UI", 8, "bold"), cursor="hand2")
+        btn_close.pack(side="right", padx=(4, 0))
+        btn_close.bind("<Button-1>", lambda _: self._close_hud(lens))
+
+        btn_expand = tk.Label(top_bar, text="🔍", fg="#a1a1aa", bg="#121214", font=("Segoe UI", 8), cursor="hand2")
+        btn_expand.pack(side="right", padx=4)
+        btn_expand.bind("<Button-1>", lambda _: [self._close_hud(lens), self._show_detailed_window(orig, trans, detected_lang, used_model, target_lang)])
+
+        btn_speak = tk.Label(top_bar, text="🔊", fg="#a1a1aa", bg="#121214", font=("Segoe UI", 8), cursor="hand2")
+        btn_speak.pack(side="right", padx=4)
+        btn_speak.bind("<Button-1>", lambda _: speak_text_async(trans))
+
+        btn_copy = tk.Label(top_bar, text="📋", fg="#a1a1aa", bg="#121214", font=("Segoe UI", 8), cursor="hand2")
+        btn_copy.pack(side="right", padx=4)
+
+        def copy_lens():
+            lens.clipboard_clear()
+            lens.clipboard_append(trans)
+            btn_copy.config(text="✔")
+            lens.after(1200, lambda: btn_copy.config(text="📋"))
+        btn_copy.bind("<Button-1>", lambda _: copy_lens())
+
+        # Main In-Place Translated Text
+        # Dynamic font size adapting to height
+        font_size = 11 if h >= 80 else (10 if h >= 50 else 9)
+        text_lbl = tk.Label(
+            container,
+            text=trans,
+            fg="#ffffff",
+            bg="#121214",
+            font=("Segoe UI", font_size, "bold"),
+            wraplength=w - 16,
+            justify="center"
+        )
+        text_lbl.pack(fill="both", expand=True, padx=4, pady=2)
+
+        lens.bind("<Escape>", lambda _: self._close_hud(lens))
+        container.bind("<Button-1>", lambda _: self._close_hud(lens))
+        text_lbl.bind("<Button-1>", lambda _: self._close_hud(lens))
+
+        # Auto-dismiss after 15 seconds
+        lens.after(15000, lambda: self._close_hud(lens))
+
+    # -----------------------------------------------------------------------
+    # Result UI: 2) Compact Floating Subtitle HUD
     # -----------------------------------------------------------------------
     def _show_compact_hud(self, orig: str, trans: str, detected_lang: str, used_model: str, target_lang: str, box_screen_coords: tuple):
         if self.current_hud_win:
@@ -713,7 +827,7 @@ class ScreenTranslatorApp:
         )
         text_lbl.pack(fill="x", pady=(2, 8), anchor="w")
 
-        # Footer Row (Copy action & status)
+        # Footer Row (Copy, Speak action & status)
         footer_row = tk.Frame(container, bg="#18181b")
         footer_row.pack(fill="x")
 
@@ -730,7 +844,10 @@ class ScreenTranslatorApp:
         btn_cp = tk.Button(footer_row, text="📋 Copy", command=copy_hud, bg="#27272a", fg="#e4e4e7", font=("Segoe UI", 8), relief="flat", padx=8, pady=2, cursor="hand2")
         btn_cp.pack(side="right")
 
-        # Calculate positioning: place directly below the cropped box, or above if close to screen bottom
+        btn_speak = tk.Button(footer_row, text="🔊 Listen", command=lambda: speak_text_async(trans), bg="#27272a", fg="#e4e4e7", font=("Segoe UI", 8), relief="flat", padx=8, pady=2, cursor="hand2")
+        btn_speak.pack(side="right", padx=(0, 6))
+
+        # Positioning: place directly below the cropped box, or above if close to screen bottom
         hud.update_idletasks()
         hud_h = hud.winfo_reqheight()
         pos_x = max(10, min(bx1, self.bounds['left'] + self.bounds['width'] - hud_w - 10))
@@ -739,7 +856,7 @@ class ScreenTranslatorApp:
         hud.geometry(f"{hud_w}x{hud_h}+{pos_x}+{pos_y}")
 
         hud.bind("<Escape>", lambda _: self._close_hud(hud))
-        # Auto-dismiss after 15 seconds of inactivity
+        # Auto-dismiss after 15 seconds
         hud.after(15000, lambda: self._close_hud(hud))
 
     def _close_hud(self, hud_win):
@@ -750,7 +867,7 @@ class ScreenTranslatorApp:
         self.is_busy = False
 
     # -----------------------------------------------------------------------
-    # Result UI: 2) Detailed Full Window
+    # Result UI: 3) Detailed Full Window
     # -----------------------------------------------------------------------
     def _show_detailed_window(self, orig: str, trans: str, detected_lang: str, used_model: str, target_lang: str):
         win = tk.Toplevel(self.root)
@@ -786,6 +903,9 @@ class ScreenTranslatorApp:
 
         btn_copy = tk.Button(bottom_row, text="Copy Translation", command=copy_translation, bg="#3f3f46", fg="#ffffff", relief="flat", padx=10, pady=5, font=("Segoe UI", 9), cursor="hand2")
         btn_copy.pack(side="right", padx=(0, 8))
+
+        btn_speak = tk.Button(bottom_row, text="🔊 Listen", command=lambda: speak_text_async(trans), bg="#27272a", fg="#38bdf8", relief="flat", padx=10, pady=5, font=("Segoe UI", 9), cursor="hand2")
+        btn_speak.pack(side="right", padx=(0, 8))
 
         btn_history = tk.Button(bottom_row, text="📜 History", command=self.show_history_window, bg="#27272a", fg="#a1a1aa", relief="flat", padx=10, pady=5, font=("Segoe UI", 9), cursor="hand2")
         btn_history.pack(side="right", padx=(0, 8))
@@ -836,7 +956,7 @@ class ScreenTranslatorApp:
     # Translation History Window
     # -----------------------------------------------------------------------
     def show_history_window(self):
-        """Displays rolling history of past translations with search and quick copy."""
+        """Displays rolling history of past translations with search, TTS, and quick copy."""
         if self.history_window and tk.Toplevel.winfo_exists(self.history_window):
             self.history_window.lift()
             self.history_window.focus_force()
@@ -922,6 +1042,9 @@ class ScreenTranslatorApp:
                 btn_cp = tk.Button(card_top, text="📋 Copy", command=copy_item, bg="#3f3f46", fg="white", font=("Segoe UI", 7), relief="flat", padx=6, cursor="hand2")
                 btn_cp.pack(side="right")
 
+                btn_spk = tk.Button(card_top, text="🔊 Listen", command=lambda t=item["translated"]: speak_text_async(t), bg="#3f3f46", fg="#38bdf8", font=("Segoe UI", 7), relief="flat", padx=6, cursor="hand2")
+                btn_spk.pack(side="right", padx=(0, 6))
+
                 tk.Label(card, text=item["original"], fg="#a1a1aa", bg="#27272a", font=("Segoe UI", 9), wraplength=580, justify="left").pack(fill="x", pady=(4, 2), anchor="w")
                 tk.Label(card, text=item["translated"], fg="#ffffff", bg="#27272a", font=("Segoe UI", 10, "bold"), wraplength=580, justify="left").pack(fill="x", anchor="w")
 
@@ -945,12 +1068,20 @@ class ScreenTranslatorApp:
             for lang in AVAILABLE_LANGUAGES
         ]
 
-        def toggle_overlay_mode():
-            new_mode = "window" if self.overlay_mode.get() == "compact" else "compact"
-            self.overlay_mode.set(new_mode)
+        def set_overlay_mode(m: str):
+            return lambda: self.overlay_mode.set(m)
+
+        mode_menu_items = [
+            pystray.MenuItem("Compact Subtitle HUD", set_overlay_mode("compact"), checked=lambda item: self.overlay_mode.get() == "compact", radio=True),
+            pystray.MenuItem("In-Place Lens Overlay", set_overlay_mode("lens"), checked=lambda item: self.overlay_mode.get() == "lens", radio=True),
+            pystray.MenuItem("Full Detailed Window", set_overlay_mode("window"), checked=lambda item: self.overlay_mode.get() == "window", radio=True)
+        ]
 
         def toggle_auto_copy():
             self.auto_copy.set(not self.auto_copy.get())
+
+        def toggle_auto_tts():
+            self.auto_tts.set(not self.auto_tts.get())
 
         def open_config_file():
             env_path = os.path.abspath(".env")
@@ -966,7 +1097,8 @@ class ScreenTranslatorApp:
             pystray.MenuItem(f"📜 History ({HISTORY_HOTKEY})", lambda: self.root.after(0, self.show_history_window)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🌐 Target Language", pystray.Menu(*lang_menu_items)),
-            pystray.MenuItem("🎛 Compact Subtitle Mode", toggle_overlay_mode, checked=lambda item: self.overlay_mode.get() == "compact"),
+            pystray.MenuItem("🎛 Display Mode", pystray.Menu(*mode_menu_items)),
+            pystray.MenuItem("🔊 Auto-Speak Translation (TTS)", toggle_auto_tts, checked=lambda item: self.auto_tts.get()),
             pystray.MenuItem("📋 Auto-Copy to Clipboard", toggle_auto_copy, checked=lambda item: self.auto_copy.get()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("⚙ Open Settings (.env)", open_config_file),
@@ -1006,12 +1138,13 @@ if __name__ == "__main__":
     app.setup_tray_icon()
 
     print("=" * 65)
-    print("Gemini Screen Translator (v1.1 - Multi-Monitor & AI Vision) is running.")
+    print("Gemini Screen Translator (v1.2 - In-Place Lens, TTS & Vision) is running.")
     print(f"Hotkey: [{HOTKEY_COMBINATION}] (Snip & Translate)")
     print(f"History: [{HISTORY_HOTKEY}] (Open Translation History)")
     print(f"Default Language: [{DEFAULT_TARGET_LANG}]")
-    print(f"Overlay Mode: [{DEFAULT_OVERLAY_MODE.capitalize()}]")
+    print(f"Overlay Mode: [{DEFAULT_OVERLAY_MODE.capitalize()}] (compact / lens / window)")
     print(f"Auto-Copy: [{'Enabled' if DEFAULT_AUTO_COPY else 'Disabled'}]")
+    print(f"Auto-TTS: [{'Enabled' if DEFAULT_AUTO_TTS else 'Disabled'}]")
     print("System Tray: Active in Windows notification area.")
     print("=" * 65)
 
