@@ -1,0 +1,132 @@
+# Gemini Screen Translator — Agent & Developer Guide
+
+This document provides a technical walkthrough of the **Gemini Screen Translator** codebase. It is written specifically for AI agents and human developers maintaining, refactoring, or extending the application.
+
+---
+
+## 1. High-Level Architecture & Lifecycle
+
+The application is a single-process, multi-threaded desktop utility running on Windows with **Tkinter** as the GUI engine and **Google Gemini Vision** as the multimodal translation backend.
+
+```
+                  ┌──────────────────────────────────────────────┐
+                  │              Main Thread (GUI)               │
+                  │       tk.Tk (hidden root window)             │
+                  │            Event Loop (.mainloop())          │
+                  └──────────────▲──────────────▲────────────────┘
+                                 │              │
+                   root.after(0) │              │ root.after(0)
+                                 │              │
+    ┌────────────────────────────┴─┐          ┌─┴────────────────────────────┐
+    │     pynput Global Hotkey     │          │     pystray System Tray      │
+    │        Daemon Thread         │          │        Daemon Thread         │
+    │  Listens for Alt+T / Alt+H   │          │   Renders Tray Icon & Menu   │
+    └──────────────────────────────┘          └──────────────────────────────┘
+                                 │
+                            triggers snip
+                                 │
+                  ┌──────────────▼──────────────────────────────┐
+                  │              Worker Daemon Thread           │
+                  │   1. PIL Image Resizing / JPEG Optim        │
+                  │   2. Gemini API Flash Vision Call           │
+                  │   3. Pydantic Structured JSON Validation    │
+                  │   4. History Buffer Update                  │
+                  └──────────────┬──────────────────────────────┘
+                                 │ root.after(0)
+                  ┌──────────────▼──────────────────────────────┐
+                  │         Display Result (Main Thread)        │
+                  │    Compact Subtitle HUD  OR  Full Window    │
+                  └─────────────────────────────────────────────┘
+```
+
+---
+
+## 2. Key Modules & Subsystems
+
+### 2.1 Display Coordinate System & DPI Awareness
+* **DPI Awareness:** Initialized at process launch via `ctypes.windll.shcore.SetProcessDpiAwareness(2)` (Per-Monitor v2). This prevents Windows from virtualizing/scaling coordinates, ensuring mouse events map 1:1 with hardware framebuffer pixels across 100%, 125%, 150%, and 4K displays.
+* **Multi-Monitor Unification:** Captured via `mss.MSS().monitors[0]`.
+  * `monitors[0]` covers the virtual bounding box of all connected monitors (including displays with negative coordinates, e.g., left secondary monitor at `x = -1920`).
+  * The overlay window (`snip_win`) is an unbordered `Toplevel` with `geometry("{width}x{height}+{left}+{top}")` and `-topmost=True`.
+  * In the Tkinter `Canvas`, `(0, 0)` maps directly to `bounds['left'], bounds['top']` in screen space.
+
+### 2.2 Interactive Bounding Box & Handles Math
+The user interacts with the canvas via mouse and keyboard:
+* **Dimmed Mask:** Four `create_rectangle` elements (`mask_top`, `mask_bottom`, `mask_left`, `mask_right`) filled with `#000000` and `stipple="gray25"`. They dynamically carve out the active selection `(x1, y1, x2, y2)`, leaving the selected area bright and dimming the rest of the desktop.
+* **8 Resize Handles:** Small 8x8 px squares (`nw`, `n`, `ne`, `e`, `se`, `s`, `sw`, `w`).
+* **Hit-Testing (`_hit_test`):**
+  * Proximity `≤ 6px` to a handle ➔ `"resize"` mode for that handle.
+  * Inside bounding box ➔ `"move"` mode with cursor `fleur`.
+  * Outside bounding box ➔ `"create"` mode with cursor `cross`.
+* **Keyboard Fine-Tuning:**
+  * Arrows: Move box by 1 px (`Shift + Arrows`: 10 px).
+  * `Alt + Arrows`: Resize box by 1 px (`Alt + Shift + Arrows`: 10 px).
+
+### 2.3 Gemini Multimodal Vision & Model Routing
+* **SDK:** `google-genai` (official Google GenAI SDK).
+* **Model Discovery & Caching:**
+  * Initialized with `FALLBACK_FLASH_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]`.
+  * `_refresh_models_async()` runs on startup in a background daemon thread, calls `client.models.list()`, sorts models by version and lite tier, and caches the result.
+  * **Critical:** `client.models.list()` is NEVER invoked inside the snip/translate worker thread. This eliminates 1–2 seconds of network overhead on every translation.
+* **Structured Output (`Pydantic` Schema):**
+  ```python
+  class TranslationResult(BaseModel):
+      detected_language: str
+      original_text: str
+      translated_text: str
+  ```
+  Passed to `types.GenerateContentConfig(response_mime_type="application/json", response_schema=TranslationResult, temperature=0.2)`.
+  This guarantees that response text is 100% valid JSON without fragile regex or string delimiters.
+
+### 2.4 Image Optimization (`optimize_image_for_vision`)
+* Converts non-RGB images to standard RGB.
+* Clamps max dimension to 1600 px using high-quality `LANCZOS` downsampling.
+* Eliminates massive uncompressed payloads when snipping high-resolution / 4K monitors, reducing upload latency by up to 70%.
+
+### 2.5 Dual Display Modes
+1. **Compact Subtitle HUD (`_show_compact_hud`):**
+   * Designed for games and visual novels.
+   * Renders a sleek, borderless, dark-glass card floating right below (or above if constrained by screen bottom) the cropped region.
+   * Auto-dismisses after 15 seconds, or closes on `Esc` / click.
+   * Provides quick `📋 Copy`, `🔍 Full View`, and `📜 History` buttons.
+2. **Detailed Window (`_show_detailed_window`):**
+   * Traditional 780x560 multi-pane text view with original transcription, translation, model telemetry, and copy button.
+
+### 2.6 History System (`show_history_window`)
+* In-memory rolling buffer (last 50 translations).
+* Searchable via real-time Tkinter text filter.
+* Shows timestamp, detected language pair (`JP ➔ EN`), original, and translated text with per-item copy buttons.
+* Triggerable via hotkey (`Alt + H`), tray icon, or HUD buttons.
+
+### 2.7 System Tray Integration (`pystray`)
+* Runs in a daemon thread via `pystray.Icon`.
+* Uses dynamic in-memory PIL icon (`create_app_icon`).
+* Thread-safe interaction: All GUI triggers dispatch back to the Tkinter main thread using `self.root.after(0, callback)`.
+
+---
+
+## 3. Environment Variables Reference
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `GEMINI_API_KEY` | `string` | *(Required)* | Google AI Studio API key |
+| `HOTKEY` | `string` | `<alt>+t` | Global hotkey to trigger screen capture |
+| `HISTORY_HOTKEY` | `string` | `<alt>+h` | Global hotkey to open translation history |
+| `TARGET_LANGUAGE` | `string` | `English` | Default target translation language |
+| `OVERLAY_MODE` | `string` | `compact` | `"compact"` for floating subtitle HUD, `"window"` for full window |
+| `AUTO_COPY` | `boolean` | `false` | Automatically copy translated text to clipboard |
+
+---
+
+## 4. Maintenance & Modification Rules for Agents
+
+1. **Thread Safety with Tkinter:**
+   * Never modify Tkinter widgets or canvas objects directly from background threads (`worker()`, `pystray`, or `pynput`).
+   * Always wrap UI updates in `self.root.after(0, lambda: ...)`.
+2. **Do Not Reintroduce OCR Engines:**
+   * Do NOT add Tesseract, pytesseract, or local EasyOCR dependencies. Gemini Vision Flash handles transcription and translation natively in a single API call with higher accuracy on stylized game fonts.
+3. **Structured Outputs:**
+   * Keep `TranslationResult` Pydantic model intact. If adding metadata (e.g. grammar breakdown, phonetics), add fields to `TranslationResult` and let Gemini fill them via JSON schema.
+4. **PyInstaller Packaging:**
+   * Always build using `fordito.spec` (`pyinstaller fordito.spec --noconfirm`).
+   * Target executable is `dist/GeminiScreenTranslator.exe`.

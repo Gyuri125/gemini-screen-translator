@@ -17,6 +17,7 @@ env/
 build/
 dist/
 *.spec
+!fordito.spec
 
 # Debug / tesztképek
 debug_*.png
